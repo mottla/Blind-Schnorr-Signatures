@@ -9,7 +9,7 @@ unforgeable. In addition, the paper defines the notion of predicate blind signat
 
 ## Benchmark: 
 
-We impement the relation using:
+We implement the relation using:
 - NIZK: Groth16 over BN256; 
 - PKE: ElGamal over the BabyJubJub curve; 
 - message length 256 bit
