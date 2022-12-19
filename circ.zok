@@ -1,0 +1,45 @@
+from "hashes/sha256/sha256Padded" import sha256Padded as sha;
+from "ecc/babyjubjubParams" import BABYJUBJUB_PARAMS;
+import "ecc/edwardsAdd" as add;
+import "ecc/edwardsScalarMult" as mul;
+import "ecc/edwardsOnCurve" as onCurve;
+from "field" import FIELD_SIZE_IN_BITS;
+import "utils/pack/bool/unpack";
+from "utils/casts.zok" import cast;
+import "utils/casts/u32_to_bits";
+import "utils/pack/u32/pack256.zok";
+
+def main(field[2] X,field[2] R, field c ,field[2] Cmsg, field[2] Calpha, field[2] Cbeta, field[2] enk, private field[2] msgG,  private field[2] alphaG ,  private field[2] betaG , private field[3] rhoG   )  {
+    
+    log("TEST ON CURVE {}",X);
+    assert(onCurve(msgG, BABYJUBJUB_PARAMS));
+    assert(onCurve(alphaG, BABYJUBJUB_PARAMS));
+    assert(onCurve(betaG, BABYJUBJUB_PARAMS));
+    field[2] G = [BABYJUBJUB_PARAMS.Gu, BABYJUBJUB_PARAMS.Gv];
+    bool[256] msg = unpack(msgG[0]);
+    bool[256] alpha = unpack(alphaG[0]);
+    bool[256] beta = unpack(betaG[0]);
+    //we do this because zokrates witness input of array 256 bit seems to be PITS
+    bool[256] rho1 = unpack(rhoG[0]);
+    bool[256] rho2 = unpack(rhoG[1]);
+    bool[256] rho3 = unpack(rhoG[2]);
+    field[2] Rprime = add( add( mul(alpha, G, BABYJUBJUB_PARAMS), mul(beta, X, BABYJUBJUB_PARAMS), BABYJUBJUB_PARAMS), R, BABYJUBJUB_PARAMS);
+    log("R' is {}", Rprime);
+    field[2] c1 = add(mul(rho1, enk , BABYJUBJUB_PARAMS),msgG, BABYJUBJUB_PARAMS);
+    field[2] c2 = add(mul(rho2, enk , BABYJUBJUB_PARAMS),alphaG, BABYJUBJUB_PARAMS);
+    field[2] c3 =  add(mul(rho3, enk , BABYJUBJUB_PARAMS),betaG, BABYJUBJUB_PARAMS);
+    log("c1 is {}, c2 is {} ,  c3 is {}", c1, c2 ,c3);
+    assert( c1== Cmsg);
+    assert( c2== Calpha);
+    assert(c3== Cbeta);
+
+
+    bool[256] rprimeX = unpack(Rprime[0]);
+    bool[256] xX = unpack(X[0]);    
+    bool[256*3] hashValue = [...rprimeX,...xX,...msg];
+    u32[8] h1 = sha(hashValue);
+    field hb1 = pack256(h1);
+    log("hash + beta {} ", hb1 + betaG[0]);
+    assert(c == hb1 + betaG[0]);
+    return ;
+}
