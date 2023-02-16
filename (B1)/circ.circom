@@ -3,10 +3,11 @@
 //secp256k1 curve and big int implementation 0xPARC's https://github.com/0xPARC/circom-ecdsa
 pragma circom 2.1.2;
 
-include "circomlib/circuits/bitify.circom";
 include "circomlib/circuits/poseidon.circom";
 include "circomlib/circuits/comparators.circom";
 include "circomlib/circuits/multiplexer.circom";
+include "circomlib/circuits/babyjub.circom";
+include "circomlib/circuits/escalarmulany.circom";
 include "secp256k1_non_native_modP/bigint.circom";
 include "secp256k1_non_native_modP/secp256k1.circom";
 include "secp256k1_non_native_modP/bigint_func.circom";
@@ -17,41 +18,97 @@ include "secp256k1_non_native_modP/secp256k1_utils.circom";
 include "circomlib/circuits/sha256/sha256.circom";
 
 
+template SplitIntoChunks(n) {
+    signal input in;
+    signal output out[4];
+
+    out[0] <-- in % (1 << n);
+    var a = (in \ (1 << n)) ;
+    out[1] <-- a % (1 << n);
+    a = (a \ (1 << n)) ;
+    out[2] <-- a  % (1 << n);
+    a = (a \ (1 << n)) ;
+    out[3] <--  a  % (1 << n);
+
+    in === out[0] + out[1]* (1 << n) + out[2]* (1 << (n*2)) +   out[3]* (1 << (n*3)) ;
+}
+
 template Main(n,k) {
     signal input X[2][k];
     signal input R[2][k];
     signal input cc[k];
     signal input Cmsg;
+    signal input C0[2];  
+    signal input ek[2];
     signal input msg;
-    signal input alpha[k];
-    signal input beta[k];
     signal input rho;
     var bitLength = n*k;
     //somehow they reserve 100 slots but only write into first k.. 
     
-    //check that Cmsg == H(alpha,beta,msg,rho)
-    //we take poseidon for the commitment
-    //we combine 2 chuncks.. but this saves only 150 constraints.. so worth it?
-    component hash2 = Poseidon(6);
-    hash2.inputs[0] <== (alpha[0]+(alpha[1]*(1<<n)));
-    hash2.inputs[1] <== (alpha[2]+(alpha[3]*(1<<n)));
-    hash2.inputs[2] <== (beta[0]+(beta[1]*(1<<n)));
-    hash2.inputs[3] <== (beta[2]+(beta[3]*(1<<n)));
-    hash2.inputs[4] <== msg;
-    hash2.inputs[5] <== rho;
-    log(hash2.out);
-    Cmsg === hash2.out; 
+ 
+    var bits = 251; //the order r of the babyjub curve is 251 bits. 
+    var i;
+    var base[2] = [5299619240641551281634865583518297030282874472190772894086521144482721001553,
+            16950150798460657717958625567821834550301663161624707787222815936182638968203];   
 
+    //ElGamal Enc
+    // H(h^rho1) + msg == c1
+    component n2b_rho1= Num2Bits(251);  //a field element has 254 bit, but we only care about the 251 first bits. Revisit this point and rethink
+   
+    //h^rho1
+    component ek_rho1 = EscalarMulAny(251);
+    ek_rho1.p[0] <== ek[0];
+    ek_rho1.p[1] <== ek[1];
+    
+    rho ==> n2b_rho1.in;
+
+     // C_0 == g^rho
+    component g_pow_rho = EscalarMulFix(251,base); 
+
+    for  (i=0; i < 251; i++) {
+        n2b_rho1.out[i] ==> ek_rho1.e[i];
+        n2b_rho1.out[i] ==> g_pow_rho.e[i];
+    }       
+
+    log("comparing C0");
+    log(g_pow_rho.out[0]);
+    log(g_pow_rho.out[1]);
+    C0[0] ===  g_pow_rho.out[0];
+    C0[1] ===  g_pow_rho.out[1];
+
+    //hash alpha and beta group elements to obtain uniform blinding factors
+    component pEx = PoseidonEx(2, 3);
+    pEx.initialState <== 0;  //Why setting it to 0.. need to read the paper
+    pEx.inputs[0] <== ek_rho1.out[0];
+    pEx.inputs[1] <== ek_rho1.out[1];  //we might not need to do this.. too little entropy anyway?
+    
+
+    log("hashed alpha");
+    log(pEx.out[0]);
+    log("hashed beta");
+    log(pEx.out[1]);
+    log("hashed message blinding");
+    log(pEx.out[2]);    
+    log("assert encryption of message is equal to the provided ciphertext");   
+    log(msg+pEx.out[2]);
+ 
+    Cmsg === msg+pEx.out[2]; 
+
+
+    component splitteralpha = SplitIntoChunks(64);
+    splitteralpha.in <== pEx.out[0];
+    component splitterbeta = SplitIntoChunks(64);
+    splitterbeta.in <== pEx.out[1];
 
     //compute alpha *G 
     component g_mult = ECDSAPrivToPub(n, k);
     for (var idx = 0; idx < k; idx++) {
-        g_mult.privkey[idx] <== alpha[idx];
+        g_mult.privkey[idx] <== splitteralpha.out[idx];
     }
     // compute beta * X
     component pubkey_mult = Secp256k1ScalarMult(n, k);
     for (var idx = 0; idx < k; idx++) {
-        pubkey_mult.scalar[idx] <== beta[idx];
+        pubkey_mult.scalar[idx] <== splitterbeta.out[idx];
         pubkey_mult.point[0][idx] <== X[0][idx];
         pubkey_mult.point[1][idx] <== X[1][idx];
     }
@@ -121,21 +178,22 @@ template Main(n,k) {
     component big_add = BigAddModP(n, k);
     for (var i = 0; i < k; i++) {
         big_add.a[i] <== fin[i].out;
-        big_add.b[i] <== beta[i];
+        big_add.b[i] <== splitterbeta.out[i];
         big_add.p[i] <== q[i];
     }  
 
 
     //assert that statment cc ==  H(R,X,m) + beta mod p
-    for (var idx = 0; idx < k; idx++) {
-        log(big_add.out[idx]);
+    log(big_add.out[0]);
+    log(big_add.out[1]);
+    log(big_add.out[2]);
+    log(big_add.out[3]);
+    for (var idx = 0; idx < k; idx++) {        
         cc[idx] === big_add.out[idx];
-    }   
-    
-    
+    }       
 
 }
 
 
 
-component main {public [X,R,cc,Cmsg]}= Main(64,4);
+component main {public [X,R,cc,Cmsg,C0]}= Main(64,4);
