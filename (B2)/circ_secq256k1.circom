@@ -1,138 +1,182 @@
 
-pragma circom 2.1.6;
-include "../circomlib/circuits/babyjub.circom";
-include "../circomlib/circuits/escalarmulany.circom";
-include "../circomlib/circuits/escalarmulfix.circom";
-include "../circomlib/circuits/bitify.circom";
+//code by Mottla so dont trust it. Not sufficiently testet!!
+// THIS PROJECT REquires https://github.com/personaelabs/spartan-ecdsa 
+// circom with secq256k1 scalar field support 
+pragma circom 2.1.2;
+
 include "../circomlib/circuits/poseidon.circom";
+include "../circomlib/circuits/comparators.circom";
+include "../circomlib/circuits/multiplexer.circom";
+include "../circomlib/circuits/sha256/sha256.circom";
+include "../secp256k1/mul.circom";
+include "../circomlib/circuits/bitify.circom";
 include "../circomlib/circuits/gates.circom";
 
-template Main(n,l) {
+
+
+template Main(n) {
+    //Note that the verifier must check that X, R,C,ek are valid curve points out
     signal input X[2];
     signal input R[2];
+    //the verifier checks that c is < q outside
     signal input c;
-    signal input Cmsg[n];
+    signal input pred;
+    signal input Cmsg;
+    signal input C0[2];  
     signal input ek[2];
-    signal input C0[2]; 
-    signal input msg[n];
+    //private inputs
     signal input rho;
-    var bits = 254; //the order r of the babyjub curve is 251 bits. 
-    var i;
-    var base[2] = [5299619240641551281634865583518297030282874472190772894086521144482721001553,
-            16950150798460657717958625567821834550301663161624707787222815936182638968203];   
+    signal input witness[n];
 
-    //ElGamal Enc
-    // H(h^rho1) + msg == c1
-    component n2b_rho1= Num2Bits(251);  //a field element has 254 bit, but we only care about the 251 first bits. Revisit this point and rethink
-    component ek_rho1 = EscalarMulAny(251);
-    ek_rho1.p[0] <== ek[0];
-    ek_rho1.p[1] <== ek[1];
+    var bitLength = 256;
+    var G[2] = [65485170049033141755572552932091555440395722142984193594072873483228125624049,
+            73163377763031141032501259779738441094247887834941211187427503803434828368457]; 
+
+     log("start");
+    //hash the transaction
+    component hashWitness = Sha256(bitLength*n);
+    component witnessBits[n]; 
+    for  (var i=0; i<n; i++) {
+        witnessBits[i] = Num2Bits(bitLength); 
+        witness[i] ==> witnessBits[i].in;
+        for  (var j=0; j < bitLength; j++) {
+            witnessBits[i].out[j] ==> hashWitness.in[i*bitLength+j];
+        }
+    }    
+    component hashVal = Bits2Num(bitLength);    
+    for  (var j=0; j < bitLength; j++) {
+        hashVal.in[j] <== hashWitness.out[j];
+    }    
+    log("sha256 hashed transaction value:");
+    var msg = hashVal.out;
+    log(hashVal.out);         
+
+    //now do some artificial predicate check
+    component tx = Bits2Num(16);    
+    for  (var j=0; j < 16; j++) {
+        tx.in[j] <== witnessBits[1].out[j];
+    }    
+    log("tx value");
+    log(tx.out);
+    log("pred value");
+    log(pred);
+    component leq = LessEqThan(16);
+    leq.in[0] <== tx.out;
+    leq.in[1] <== pred;
+    log("comparing value < pred:");
+    log(leq.out);
+    1 === leq.out;
+  
+    log("start DHIES");
+    // check if H(ek^rho) + msg == c1   
+    // DHIES: to encrypt msg under public key ek, sample rho, and blind msg with H(ek^rho)   
+    component ek_rho = Secp256k1Mul();
+    ek_rho.scalar <== rho;
+    ek_rho.xP <== ek[0];
+    ek_rho.yP <== ek[1];
+
     
-    rho ==> n2b_rho1.in;
-    for  (i=0; i < 251; i++) {
-        n2b_rho1.out[i] ==> ek_rho1.e[i];
-    }
-
-     // C_0 == g^rho
-    component g_pow_rho = EscalarMulFix(251,base);    
-    for  (i=0; i < 251; i++) {
-        n2b_rho1.out[i] ==> g_pow_rho.e[i];
-    }
+    // C_0 == g^rho     //proof knowledge of the secret key rho
+    component g_pow_rho = Secp256k1Mul();    
+    g_pow_rho.scalar <== rho;
+    g_pow_rho.xP <== G[0];
+    g_pow_rho.yP <== G[1];
     log("comparing C0");
-    log(g_pow_rho.out[0]);
-    log(g_pow_rho.out[1]);
-    C0[0] ===  g_pow_rho.out[0];
-    C0[1] ===  g_pow_rho.out[1];
+    log(g_pow_rho.outX);
+    log(g_pow_rho.outY);
+    C0[0] ===  g_pow_rho.outX;
+    C0[1] ===  g_pow_rho.outY;
 
-    
+
+    log("start hash");
+     // H(X^rho) 
     //hash alpha and beta group elements to obtain uniform blinding factors
-    component pEx = PoseidonEx(2, 3);
+    component pEx = PoseidonEx(2, 3);   //it seems that we cant squeeze as many times we want in the current circom implementation. Optimize this later
     pEx.initialState <== 0;  //Why setting it to 0.. need to read the paper
-    pEx.inputs[0] <== ek_rho1.out[0];
-    pEx.inputs[1] <== ek_rho1.out[1];
+    pEx.inputs[0] <== ek_rho.outX;  //absorb the X and Y coordinate
+    pEx.inputs[1] <== ek_rho.outY;
     
 
     log("hashed alpha");
     log(pEx.out[0]);
+    var alpha = pEx.out[0];
     log("hashed beta");
-    var beta = pEx.out[1];
-    log(pEx.out[1]);  
-    log("start encryption of message is equal to the provided ciphertext");   
-    
-    var rand[n+1];
-    rand[0] = pEx.out[2];
-    //this is a bit of a mess.. seems we cant squeeze the spong arbitrary many times so this served as a quick workaround. I use PoseidonEx(1,2) since its more efficient that 1-1 poseidon it seems..
-    component randEnc[n] ;
-    for(var i=1;i<n;i+=2){
-        randEnc[i] = PoseidonEx(1, 2);
-        randEnc[i].initialState <== 0;
-        randEnc[i].inputs[0] <== rand[i-1]; 
-        rand[i] = randEnc[i].out[0];
-        rand[i+1] = randEnc[i].out[1];
-        
-    }
-    for(var i=0;i<n;i++){
-        log(msg[i]+rand[i]);
-        Cmsg[i] === msg[i]+rand[i] ;
-    }
-    
+    log(pEx.out[1]);
+    var beta = pEx.out[2];
+    log("hashed message blinding");
+    log(pEx.out[2]);    
+    log("assert encryption of message is equal to the provided ciphertext");   
+    log(msg+pEx.out[2]);
+     // H(ek^rho) + msg == c1
+    Cmsg === msg+pEx.out[2]; 
  
 
-     //compute alpha*G
-    component n2b_alpha = Num2Bits(bits);
-    component alpha_G = EscalarMulFix(bits,base);
+     //now lets do the Schnorr stuff. 
+     //compute alpha*G   
+    component alpha_G = Secp256k1Mul();
   
-    pEx.out[0] ==> n2b_alpha.in;
-    for  (i=0; i<bits; i++) {
-        n2b_alpha.out[i] ==> alpha_G.e[i];
-    }
-
-    //compute beta*X
-    component n2b_beta = Num2Bits(bits);
-    component beta_X = EscalarMulAny(bits);
-    beta_X.p[0] <== X[0];
-    beta_X.p[1] <== X[1];
+    alpha_G.scalar <== alpha;
+    alpha_G.xP <== G[0];
+    alpha_G.yP <== G[1];
     
-    pEx.out[1] ==> n2b_beta.in;
-    for  (i=0; i<bits; i++) {
-        n2b_beta.out[i] ==> beta_X.e[i];
-    }
+    //compute beta*X   
+    component beta_X  = Secp256k1Mul();
+  
+    beta_X.scalar <== beta;
+    beta_X.xP <== X[0];
+    beta_X.yP <== X[1];
 
     // R'' = aG+bX
-    component add1 = BabyAdd();
-    add1.x1 <== alpha_G.out[0];
-    add1.y1 <== alpha_G.out[1];
-    add1.x2 <== beta_X.out[0];
-    add1.y2 <== beta_X.out[1];
-	
-    component add2 = BabyAdd();
-    add2.x1 <== add1.xout;
-    add2.y1 <== add1.yout;
-    add2.x2 <== R[0];
-    add2.y2 <== R[1];
+    component add1 = Secp256k1AddComplete();
+    add1.xP <== alpha_G.outX;
+    add1.yP <== alpha_G.outY;
+    add1.xQ <== beta_X.outX;
+    add1.yQ <== beta_X.outY;
     
+        // R' = R+R''
+    component add2 = Secp256k1AddComplete();
+    add2.xP <== add1.outX;
+    add2.yP <== add1.outY;
+    add2.xQ <== R[0];
+    add2.yQ <== R[1];    
 
-    component hash = Poseidon(2+n+l);
-    hash.inputs[0] <== add2.xout;
-    hash.inputs[1] <== X[0];
-    for(var i=2;i<l+2;i++){
-        hash.inputs[i] <== msgPublicn[i-2];
-    }
-    for(var i=l+2;i<n+2+l;i++){
-        hash.inputs[i] <== msg[i-2-l];
-    }
+    //prepare to create the Schnorr challenge c = H(R,X,m) using SHA256
+    component hash = Sha256(bitLength*3);
     
- log("final Schnorr check");
+    //write the x coordinate of R' into the hash input
+    component Rbits = Num2Bits(bitLength);    
+    add2.outX ==> Rbits.in;
+    for  (var i=0; i<bitLength; i++) {
+        Rbits.out[i] ==> hash.in[i];
+    }
+    //Write the public key X's x-coordinate into the hash input
+    component Xsgbits = Num2Bits(bitLength);    
+    X[0] ==> Xsgbits.in;
+    for  (var i=0; i<bitLength; i++) {
+        Xsgbits.out[i] ==> hash.in[bitLength+i];
+    }
+
+    //write the message m into the hash input
+    component msgbits = Num2Bits(bitLength);    
+    msg ==> msgbits.in;
+    for  (var i=0; i<bitLength; i++) {
+        msgbits.out[i] ==> hash.in[(bitLength*2)+i];
+    } 
+
+    component shaOutputAsNumber = Bits2Num(bitLength);   
+     for  (var i=0; i<bitLength; i++) {
+        hash.out[i] ==> shaOutputAsNumber.in[i];
+    } 
+
+    log("final Schnorr check");
     component addModq = add_mod_q(64,4); 
-    addModq.a <== hash.out;
+    addModq.a <== shaOutputAsNumber.out;
     addModq.b <== beta;
-    log(hash.out+ beta);
+    log(shaOutputAsNumber.out+ beta);
     log(addModq.c);
     c ===  addModq.c; 
 
 }
-
-
 
 
 template SplitIntoChunks(bits,chuncks) {
@@ -153,7 +197,8 @@ template SplitIntoChunks(bits,chuncks) {
     in === sum;
 }
 
-//return a+b mod q , where q is the order of the jubjubcurve
+//this function requires an arithmetization field >q. Dont
+//use with standart CIRCOM. 
 template add_mod_q(n,k) {
     //apparently n=64 k=4 gives the best results
     signal input a;
@@ -166,7 +211,7 @@ template add_mod_q(n,k) {
     splittB.in <== b;
     
     component qChuncks = SplitIntoChunks(n,k);
-    qChuncks.in <== 2736030358979909402780800718157159386076813972158567259200215660948447373041;
+    qChuncks.in <== 115792089237316195423570985008687907852837564279074904382605163141518161494337;
     //perform addition mod q
     //TODO mod reduce.. 
     component big_add = BigAddModP(n, k);
@@ -388,6 +433,4 @@ template ModSubThree(n) {
     out <== borrow * (1 << n) + a - b_plus_c;
 }
 
-component main {public [X,ek,R,c,Cmsg,C0]}= Main(8,0);
-
-
+component main {public [X,R,c,C0,Cmsg,pred,ek]}= Main(8);
